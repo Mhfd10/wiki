@@ -127,9 +127,12 @@ module.exports = class Page extends Model {
    * using static hooks
    * @see https://vincit.github.io/objection.js/api/types/#type-statichookarguments
    */
-  static async beforeDelete({ asFindQuery }) {
-    const page = await asFindQuery().select('id')
-    await WIKI.models.comments.query().delete().where('pageId', page[0].id)
+  static async beforeDelete({ asFindQuery, transaction }) {
+    const pages = await asFindQuery().select('id')
+    const pageIds = pages.map(page => page.id)
+    if (pageIds.length > 0) {
+      await WIKI.models.comments.query(transaction).delete().whereIn('pageId', pageIds)
+    }
   }
   /**
    * Cache Schema
@@ -262,12 +265,6 @@ module.exports = class Page extends Model {
       throw new WIKI.Error.PageDeleteForbidden()
     }
 
-    // -> Check for duplicate
-    const dupCheck = await WIKI.models.pages.query().select('id').where('localeCode', opts.locale).where('path', opts.path).first()
-    if (dupCheck) {
-      throw new WIKI.Error.PageDuplicateCreate()
-    }
-
     // -> Check for empty content
     if (!opts.content || _.trim(opts.content).length < 1) {
       throw new WIKI.Error.PageEmptyContent()
@@ -295,8 +292,8 @@ module.exports = class Page extends Model {
       scriptJs = opts.scriptJs || ''
     }
 
-    // -> Create page
-    await WIKI.models.pages.query().insert({
+    // -> Create page and its tag associations atomically
+    const pageData = {
       authorId: opts.user.id,
       content: opts.content,
       creatorId: opts.user.id,
@@ -316,6 +313,24 @@ module.exports = class Page extends Model {
         js: scriptJs,
         css: scriptCss
       })
+    }
+    await WIKI.models.knex.transaction(async trx => {
+      // -> Check for duplicate
+      const dupCheck = await WIKI.models.pages.query(trx)
+        .select('id')
+        .where('localeCode', opts.locale)
+        .where('path', opts.path)
+        .first()
+      if (dupCheck) {
+        throw new WIKI.Error.PageDuplicateCreate()
+      }
+      // -> Create page
+      const insertedPage = await WIKI.models.pages.query(trx).insert(pageData)
+
+      // -> Save Tags
+      if (opts.tags && opts.tags.length > 0) {
+        await WIKI.models.tags.associateTags({ tags: opts.tags, page: insertedPage, trx })
+      }
     })
     const page = await WIKI.models.pages.getPageFromDb({
       path: opts.path,
@@ -323,11 +338,6 @@ module.exports = class Page extends Model {
       userId: opts.user.id,
       isPrivate: opts.isPrivate
     })
-
-    // -> Save Tags
-    if (opts.tags && opts.tags.length > 0) {
-      await WIKI.models.tags.associateTags({ tags: opts.tags, page })
-    }
 
     // -> Render page to HTML
     await WIKI.models.pages.renderPage(page)
@@ -387,14 +397,6 @@ module.exports = class Page extends Model {
       throw new WIKI.Error.PageEmptyContent()
     }
 
-    // -> Create version snapshot
-    await WIKI.models.pageHistory.addVersion({
-      ...ogPage,
-      isPublished: ogPage.isPublished === true || ogPage.isPublished === 1,
-      action: opts.action ? opts.action : 'updated',
-      versionDate: ogPage.updatedAt
-    })
-
     // -> Format Extra Properties
     if (!_.isPlainObject(ogPage.extra)) {
       ogPage.extra = {}
@@ -422,8 +424,7 @@ module.exports = class Page extends Model {
       scriptJs = opts.scriptJs || ''
     }
 
-    // -> Update page
-    await WIKI.models.pages.query().patch({
+    const pagePatch = {
       authorId: opts.user.id,
       content: opts.content,
       description: opts.description,
@@ -436,15 +437,66 @@ module.exports = class Page extends Model {
         js: scriptJs,
         css: scriptCss
       })
-    }).where('id', ogPage.id)
+    }
+
+    let move = null
+    await WIKI.models.knex.transaction(async trx => {
+      const currentPageQuery = WIKI.models.pages.query(trx).findById(ogPage.id)
+      if (!String(_.get(WIKI, 'models.knex.client.config.client', '')).includes('sqlite')) {
+        currentPageQuery.forUpdate()
+      }
+      const currentPage = await currentPageQuery
+      if (!currentPage) {
+        throw new WIKI.Error.PageNotFound()
+      }
+      if (!WIKI.auth.checkAccess(opts.user, ['write:pages'], {
+        locale: currentPage.localeCode,
+        path: currentPage.path
+      })) {
+        throw new WIKI.Error.PageUpdateForbidden()
+      }
+
+      // History, content, tag links and an optional move must commit together.
+      // -> Create version snapshot
+      await WIKI.models.pageHistory.addVersion({
+        ...currentPage,
+        isPublished: currentPage.isPublished === true || currentPage.isPublished === 1,
+        action: opts.action ? opts.action : 'updated',
+        versionDate: currentPage.updatedAt
+      }, trx)
+
+      // -> Update page
+      await WIKI.models.pages.query(trx).patch(pagePatch).findById(currentPage.id)
+      const updatedPage = await WIKI.models.pages.query(trx).findById(currentPage.id)
+
+      // -> Save Tags
+      await WIKI.models.tags.associateTags({ tags: opts.tags, page: updatedPage, trx })
+
+      // -> Perform move?
+      if ((opts.locale && opts.locale !== updatedPage.localeCode) || (opts.path && opts.path !== updatedPage.path)) {
+        move = await WIKI.models.pages.movePageInTransaction({
+          id: updatedPage.id,
+          destinationLocale: opts.locale,
+          destinationPath: opts.path,
+          user: opts.user
+        }, trx)
+      } else {
+        // -> Update title of page tree entry
+        await trx.table('pageTree').where({
+          pageId: updatedPage.id
+        }).update('title', updatedPage.title)
+      }
+    })
+
     let page = await WIKI.models.pages.getPageFromDb(ogPage.id)
 
-    // -> Save Tags
-    await WIKI.models.tags.associateTags({ tags: opts.tags, page })
-
-    // -> Render page to HTML
+    // -> Render and synchronize only after the database transaction commits.
     await WIKI.models.pages.renderPage(page)
-    WIKI.events.outbound.emit('deletePageFromCache', page.hash)
+    if (move) {
+      await WIKI.models.pages.syncPageMove(move, opts)
+    } else {
+      WIKI.events.outbound.emit('deletePageFromCache', page.hash)
+    }
 
     // -> Update Search Index
     const pageContents = await WIKI.models.pages.query().findById(page.id).select('render')
@@ -457,29 +509,6 @@ module.exports = class Page extends Model {
         event: 'updated',
         page
       })
-    }
-
-    // -> Perform move?
-    if ((opts.locale && opts.locale !== page.localeCode) || (opts.path && opts.path !== page.path)) {
-      // -> Check target path access
-      if (!WIKI.auth.checkAccess(opts.user, ['write:pages'], {
-        locale: opts.locale,
-        path: opts.path
-      })) {
-        throw new WIKI.Error.PageMoveForbidden()
-      }
-
-      await WIKI.models.pages.movePage({
-        id: page.id,
-        destinationLocale: opts.locale,
-        destinationPath: opts.path,
-        user: opts.user
-      })
-    } else {
-      // -> Update title of page tree entry
-      await WIKI.models.knex.table('pageTree').where({
-        pageId: page.id
-      }).update('title', page.title)
     }
 
     // -> Get latest updatedAt
@@ -628,22 +657,23 @@ module.exports = class Page extends Model {
       }
     }
 
-    // -> Create version snapshot
-    if (shouldConvert) {
-      await WIKI.models.pageHistory.addVersion({
-        ...ogPage,
-        isPublished: ogPage.isPublished === true || ogPage.isPublished === 1,
-        action: 'updated',
-        versionDate: ogPage.updatedAt
-      })
-    }
+    await WIKI.models.knex.transaction(async trx => {
+      // The conversion snapshot and converted page are one database change.
+      if (shouldConvert) {
+        await WIKI.models.pageHistory.addVersion({
+          ...ogPage,
+          isPublished: ogPage.isPublished === true || ogPage.isPublished === 1,
+          action: 'updated',
+          versionDate: ogPage.updatedAt
+        }, trx)
+      }
 
-    // -> Update page
-    await WIKI.models.pages.query().patch({
-      contentType: targetContentType,
-      editorKey: opts.editor,
-      ...(convertedContent ? { content: convertedContent } : {})
-    }).where('id', ogPage.id)
+      await WIKI.models.pages.query(trx).patch({
+        contentType: targetContentType,
+        editorKey: opts.editor,
+        ...(convertedContent ? { content: convertedContent } : {})
+      }).where('id', ogPage.id)
+    })
     const page = await WIKI.models.pages.getPageFromDb(ogPage.id)
 
     await WIKI.models.pages.deletePageFromCache(page.hash)
@@ -657,38 +687,44 @@ module.exports = class Page extends Model {
   }
 
   /**
-   * Move a Page
+   * Apply a page move using an existing transaction.
    *
-   * @param {Object} opts Page Properties
-   * @returns {Promise} Promise with no value
+   * @param {Object} opts Page properties
+   * @param {Object} trx Database transaction
+   * @returns {Promise<Object>} Details needed for post-commit synchronization
    */
-  static async movePage(opts) {
-    let page
+  static async movePageInTransaction (opts, trx) {
+    let pageQuery
     if (_.has(opts, 'id')) {
-      page = await WIKI.models.pages.query().findById(opts.id)
+      pageQuery = WIKI.models.pages.query(trx).findById(opts.id)
     } else {
-      page = await WIKI.models.pages.query().findOne({
+      pageQuery = WIKI.models.pages.query(trx).findOne({
         path: opts.path,
         localeCode: opts.locale
       })
     }
+    if (!String(_.get(WIKI, 'models.knex.client.config.client', '')).includes('sqlite')) {
+      pageQuery.forUpdate()
+    }
+    const page = await pageQuery
     if (!page) {
       throw new WIKI.Error.PageNotFound()
     }
 
     // -> Validate path
-    if (opts.destinationPath.includes('.') || opts.destinationPath.includes(' ') || opts.destinationPath.includes('\\') || opts.destinationPath.includes('//')) {
+    let destinationPath = opts.destinationPath
+    if (destinationPath.includes('.') || destinationPath.includes(' ') || destinationPath.includes('\\') || destinationPath.includes('//')) {
       throw new WIKI.Error.PageIllegalPath()
     }
 
     // -> Remove trailing slash
-    if (opts.destinationPath.endsWith('/')) {
-      opts.destinationPath = opts.destinationPath.slice(0, -1)
+    if (destinationPath.endsWith('/')) {
+      destinationPath = destinationPath.slice(0, -1)
     }
 
     // -> Remove starting slash
-    if (opts.destinationPath.startsWith('/')) {
-      opts.destinationPath = opts.destinationPath.slice(1)
+    if (destinationPath.startsWith('/')) {
+      destinationPath = destinationPath.slice(1)
     }
 
     // -> Check for source page access
@@ -701,37 +737,58 @@ module.exports = class Page extends Model {
     // -> Check for destination page access
     if (!WIKI.auth.checkAccess(opts.user, ['write:pages'], {
       locale: opts.destinationLocale,
-      path: opts.destinationPath
+      path: destinationPath
     })) {
       throw new WIKI.Error.PageMoveForbidden()
     }
 
     // -> Check for existing page at destination path
-    const destPage = await WIKI.models.pages.query().findOne({
-      path: opts.destinationPath,
+    const destPage = await WIKI.models.pages.query(trx).findOne({
+      path: destinationPath,
       localeCode: opts.destinationLocale
     })
     if (destPage) {
       throw new WIKI.Error.PagePathCollision()
     }
-
     // -> Create version snapshot
     await WIKI.models.pageHistory.addVersion({
       ...page,
       action: 'moved',
       versionDate: page.updatedAt
-    })
+    }, trx)
 
-    const destinationHash = pageHelper.generateHash({ path: opts.destinationPath, locale: opts.destinationLocale, privateNS: opts.isPrivate ? 'TODO' : '' })
+    const destinationHash = pageHelper.generateHash({ path: destinationPath, locale: opts.destinationLocale, privateNS: page.isPrivate ? 'TODO' : '' })
 
     // -> Move page
-    const destinationTitle = (page.title === _.last(page.path.split('/')) ? _.last(opts.destinationPath.split('/')) : page.title)
-    await WIKI.models.pages.query().patch({
-      path: opts.destinationPath,
+    const destinationTitle = (page.title === _.last(page.path.split('/')) ? _.last(destinationPath.split('/')) : page.title)
+    const updatedPages = await WIKI.models.pages.query(trx).patch({
+      path: destinationPath,
       localeCode: opts.destinationLocale,
       title: destinationTitle,
       hash: destinationHash
     }).findById(page.id)
+    if (updatedPages !== 1) {
+      throw new WIKI.Error.PageNotFound()
+    }
+
+    return {
+      page,
+      destinationPath,
+      destinationLocale: opts.destinationLocale,
+      destinationTitle,
+      destinationHash
+    }
+  }
+
+  /**
+   * Synchronize non-transactional systems after a committed page move.
+   *
+   * @param {Object} move Committed move details
+   * @param {Object} opts Page properties
+   * @returns {Promise} Promise with no value
+   */
+  static async syncPageMove (move, opts) {
+    const { page, destinationPath, destinationLocale, destinationTitle, destinationHash } = move
     await WIKI.models.pages.deletePageFromCache(page.hash)
     WIKI.events.outbound.emit('deletePageFromCache', page.hash)
 
@@ -743,8 +800,8 @@ module.exports = class Page extends Model {
     page.safeContent = WIKI.models.pages.cleanHTML(pageContents.render)
     await WIKI.data.searchEngine.renamed({
       ...page,
-      destinationPath: opts.destinationPath,
-      destinationLocaleCode: opts.destinationLocale,
+      destinationPath,
+      destinationLocaleCode: destinationLocale,
       title: destinationTitle,
       destinationHash
     })
@@ -755,8 +812,8 @@ module.exports = class Page extends Model {
         event: 'renamed',
         page: {
           ...page,
-          destinationPath: opts.destinationPath,
-          destinationLocaleCode: opts.destinationLocale,
+          destinationPath,
+          destinationLocaleCode: destinationLocale,
           destinationHash,
           moveAuthorId: opts.user.id,
           moveAuthorName: opts.user.name,
@@ -769,17 +826,31 @@ module.exports = class Page extends Model {
     await WIKI.models.pages.reconnectLinks({
       sourceLocale: page.localeCode,
       sourcePath: page.path,
-      locale: opts.destinationLocale,
-      path: opts.destinationPath,
+      locale: destinationLocale,
+      path: destinationPath,
       mode: 'move'
     })
 
     // -> Reconnect Links : Validate invalid links to the new path
     await WIKI.models.pages.reconnectLinks({
-      locale: opts.destinationLocale,
-      path: opts.destinationPath,
+      locale: destinationLocale,
+      path: destinationPath,
       mode: 'create'
     })
+  }
+
+  /**
+   * Move a Page
+   *
+   * @param {Object} opts Page Properties
+   * @returns {Promise} Promise with no value
+   */
+  static async movePage(opts) {
+    let move
+    await WIKI.models.knex.transaction(async trx => {
+      move = await WIKI.models.pages.movePageInTransaction(opts, trx)
+    })
+    await WIKI.models.pages.syncPageMove(move, opts)
   }
 
   /**
@@ -802,15 +873,18 @@ module.exports = class Page extends Model {
       throw new WIKI.Error.PageDeleteForbidden()
     }
 
-    // -> Create version snapshot
-    await WIKI.models.pageHistory.addVersion({
-      ...page,
-      action: 'deleted',
-      versionDate: page.updatedAt
+    // -> Create version snapshot and delete page atomically
+    await WIKI.models.knex.transaction(async trx => {
+      await WIKI.models.pageHistory.addVersion({
+        ...page,
+        action: 'deleted',
+        versionDate: page.updatedAt
+      }, trx)
+      await WIKI.models.pages.query()
+        .delete()
+        .where('id', page.id)
+        .transacting(trx)
     })
-
-    // -> Delete page
-    await WIKI.models.pages.query().delete().where('id', page.id)
     await WIKI.models.pages.deletePageFromCache(page.hash)
     WIKI.events.outbound.emit('deletePageFromCache', page.hash)
 

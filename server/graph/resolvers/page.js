@@ -173,8 +173,8 @@ module.exports = {
     async singleByPath(obj, args, context, info) {
       let page = await WIKI.models.pages.getPageFromDb({
         path: args.path,
-        locale: args.locale,
-      });
+        locale: args.locale
+      })
       if (page) {
         if (WIKI.auth.checkAccess(context.req.user, ['manage:pages', 'delete:pages'], {
           path: page.path,
@@ -477,13 +477,15 @@ module.exports = {
      */
     async deleteTag (obj, args, context) {
       try {
-        const tagToDel = await WIKI.models.tags.query().findById(args.id)
-        if (tagToDel) {
-          await tagToDel.$relatedQuery('pages').unrelate()
-          await WIKI.models.tags.query().deleteById(args.id)
-        } else {
-          throw new Error('This tag does not exist.')
-        }
+        await WIKI.models.knex.transaction(async trx => {
+          const tagToDel = await WIKI.models.tags.query(trx).findById(args.id)
+          if (tagToDel) {
+            await tagToDel.$relatedQuery('pages', trx).unrelate()
+            await WIKI.models.tags.query(trx).deleteById(args.id)
+          } else {
+            throw new Error('This tag does not exist.')
+          }
+        })
         return {
           responseResult: graphHelper.generateSuccess('Tag has been deleted.')
         }

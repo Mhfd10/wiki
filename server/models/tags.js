@@ -50,8 +50,8 @@ module.exports = class Tag extends Model {
     this.updatedAt = new Date().toISOString()
   }
 
-  static async associateTags ({ tags, page }) {
-    let existingTags = await WIKI.models.tags.query().column('id', 'tag')
+  static async associateTags ({ tags, page, trx }) {
+    let existingTags = await WIKI.models.tags.query(trx).column('id', 'tag')
 
     // Format tags
 
@@ -65,11 +65,11 @@ module.exports = class Tag extends Model {
     }))
     if (newTags.length > 0) {
       if (WIKI.config.db.type === 'postgres') {
-        const createdTags = await WIKI.models.tags.query().insert(newTags)
+        const createdTags = await WIKI.models.tags.query(trx).insert(newTags)
         existingTags = _.concat(existingTags, createdTags)
       } else {
         for (const newTag of newTags) {
-          const createdTag = await WIKI.models.tags.query().insert(newTag)
+          const createdTag = await WIKI.models.tags.query(trx).insert(newTag)
           existingTags.push(createdTag)
         }
       }
@@ -78,17 +78,17 @@ module.exports = class Tag extends Model {
     // Fetch current page tags
 
     const targetTags = _.filter(existingTags, t => _.includes(tags, t.tag))
-    const currentTags = await page.$relatedQuery('tags')
+    const currentTags = await page.$relatedQuery('tags', trx)
 
     // Tags to relate
 
     const tagsToRelate = _.differenceBy(targetTags, currentTags, 'id')
     if (tagsToRelate.length > 0) {
       if (WIKI.config.db.type === 'postgres') {
-        await page.$relatedQuery('tags').relate(tagsToRelate)
+        await page.$relatedQuery('tags', trx).relate(tagsToRelate)
       } else {
         for (const tag of tagsToRelate) {
-          await page.$relatedQuery('tags').relate(tag)
+          await page.$relatedQuery('tags', trx).relate(tag)
         }
       }
     }
@@ -97,7 +97,7 @@ module.exports = class Tag extends Model {
 
     const tagsToUnrelate = _.differenceBy(currentTags, targetTags, 'id')
     if (tagsToUnrelate.length > 0) {
-      await page.$relatedQuery('tags').unrelate().whereIn('tags.id', _.map(tagsToUnrelate, 'id'))
+      await page.$relatedQuery('tags', trx).unrelate().whereIn('tags.id', _.map(tagsToUnrelate, 'id'))
     }
 
     page.tags = targetTags
