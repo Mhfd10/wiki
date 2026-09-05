@@ -316,14 +316,16 @@ module.exports = class Page extends Model {
     }
     await WIKI.models.knex.transaction(async trx => {
       // -> Check for duplicate
-      // Check and claim the URL while holding the historical redirect row.
-      // The database uniqueness constraint remains the final guard against a
-      // concurrent page creation at a previously unused path.
-      const dupCheck = await WIKI.models.pages.query(trx)
+      await WIKI.models.pages.lockDestinationLocale(opts.locale, trx)
+      const duplicateQuery = WIKI.models.pages.query(trx)
         .select('id')
         .where('localeCode', opts.locale)
         .where('path', opts.path)
         .first()
+      if (!String(_.get(WIKI, 'models.knex.client.config.client', '')).includes('sqlite')) {
+        duplicateQuery.forUpdate()
+      }
+      const dupCheck = await duplicateQuery
       const redirectQuery = WIKI.models.pageRedirects.query(trx)
         .select('id', 'pageId')
         .where('localeCode', opts.locale)
@@ -703,6 +705,21 @@ module.exports = class Page extends Model {
   }
 
   /**
+   * Serialize destination claims, including URLs with no page or redirect row.
+   * Upstream pages have no unique path constraint. Lock an existing locale row
+   * before checking its paths; SQLite acquires its writer lock via a no-op update.
+   * Destination lookups must use current reads on repeatable-read databases.
+   */
+  static async lockDestinationLocale (locale, trx) {
+    const query = trx('locales').where('code', locale)
+    if (String(_.get(WIKI, 'models.knex.client.config.client', '')).includes('sqlite')) {
+      await query.update({ code: locale })
+    } else {
+      await query.forUpdate()
+    }
+  }
+
+  /**
    * Apply a page move using an existing transaction.
    *
    * @param {Object} opts Page properties
@@ -759,10 +776,15 @@ module.exports = class Page extends Model {
     }
 
     // -> Check for existing page at destination path
-    const destPage = await WIKI.models.pages.query(trx).findOne({
+    await WIKI.models.pages.lockDestinationLocale(opts.destinationLocale, trx)
+    const destinationQuery = WIKI.models.pages.query(trx).findOne({
       path: destinationPath,
       localeCode: opts.destinationLocale
     })
+    if (!String(_.get(WIKI, 'models.knex.client.config.client', '')).includes('sqlite')) {
+      destinationQuery.forUpdate()
+    }
+    const destPage = await destinationQuery
     const redirectQuery = WIKI.models.pageRedirects.query(trx).findOne({
       path: destinationPath,
       localeCode: opts.destinationLocale

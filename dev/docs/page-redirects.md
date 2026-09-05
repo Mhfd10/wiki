@@ -7,6 +7,11 @@ no-store`, preserve query parameters, and check read access at the destination.
 Rendered internal links preserve query strings and fragments and are tracked
 against the current destination. Deleting the target removes its redirects.
 
+Destination claims lock the locale row before checking page and redirect paths.
+This also serializes claims for unused URLs: upstream's pages table has no unique
+path constraint. Concurrent create/move operations within one locale may wait or
+fail with a database contention error; retry after checking the current state.
+
 ## Migration and compatibility
 
 Migration `2.5.129` creates `pageRedirects` in the shared and SQLite migration

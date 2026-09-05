@@ -1,5 +1,8 @@
 const Knex = require('knex')
 const { Model } = require('objection')
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
 
 const ErrorClasses = require('../../../helpers/error')
 const Page = require('../../../models/pages')
@@ -13,7 +16,8 @@ const htmlCoreRenderer = require('../../../modules/rendering/html-core/renderer'
 const pageResolver = require('../../../graph/resolvers/page')
 const commonRouter = require('../../../controllers/common')
 
-module.exports = function pageFixture () {
+module.exports = function pageFixture ({ concurrent = false } = {}) {
+  let temporaryDirectory
   const user = {
     id: 1,
     name: 'Test User',
@@ -62,7 +66,6 @@ module.exports = function pageFixture () {
       table.string('localeCode', 5)
       table.integer('authorId').unsigned()
       table.integer('creatorId').unsigned()
-      table.unique(['path', 'localeCode'])
     })
     await knex.schema.createTable('comments', table => {
       table.increments('id').primary()
@@ -208,12 +211,23 @@ module.exports = function pageFixture () {
   }
 
   beforeAll(async () => {
+    if (concurrent) {
+      temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-concurrency-'))
+    }
     knex = Knex({
       client: 'sqlite3',
-      connection: { filename: ':memory:' },
+      connection: { filename: concurrent ? path.join(temporaryDirectory, 'test.sqlite') : ':memory:' },
+      pool: {
+        min: 1,
+        max: concurrent ? 3 : 1,
+        afterCreate: (connection, done) => {
+          connection.run('PRAGMA foreign_keys = ON', err => done(err, connection))
+        }
+      },
       useNullAsDefault: true
     })
     await knex.raw('PRAGMA foreign_keys = ON')
+    if (concurrent) { await knex.raw('PRAGMA journal_mode = WAL') }
     Model.knex(knex)
     await createSchema()
 
@@ -298,6 +312,7 @@ module.exports = function pageFixture () {
     delete global.WIKI
     Model.knex(null)
     await knex.destroy()
+    if (temporaryDirectory) { fs.rmSync(temporaryDirectory, { recursive: true }) }
   })
 
   return { user, context, insertPage, movePage, updateContent, getPage, getRedirect, renderLink, requestHistoricalPath, get knex () { return knex } }
