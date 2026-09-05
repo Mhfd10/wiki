@@ -133,29 +133,56 @@ module.exports = {
 
     if (internalRefs.length > 0) {
       // -> Find matching pages
-      const results = await WIKI.models.pages.query().column('id', 'path', 'localeCode').where(builder => {
-        internalRefs.forEach((ref, idx) => {
-          if (idx < 1) {
-            builder.where(ref)
-          } else {
-            builder.orWhere(ref)
-          }
-        })
-      })
+      const [matchingPages, redirects] = await Promise.all([
+        WIKI.models.pages.query().column('id', 'path', 'localeCode').where(builder => {
+          internalRefs.forEach((ref, idx) => {
+            if (idx < 1) {
+              builder.where(ref)
+            } else {
+              builder.orWhere(ref)
+            }
+          })
+        }),
+        WIKI.models.pageRedirects.resolveMany({ refs: internalRefs })
+      ])
+      const refKey = ref => `${ref.localeCode}\u0000${ref.path}`
+      const matchingPageKeys = new Set(matchingPages.map(refKey))
+      const redirectsBySource = new Map(redirects.map(redirect => [
+        refKey({ path: redirect.sourcePath, localeCode: redirect.sourceLocaleCode }),
+        { path: redirect.path, localeCode: redirect.localeCode }
+      ]))
+      const validPageKeys = new Set([
+        ...matchingPageKeys,
+        ...redirects.map(refKey)
+      ])
+      const resolveRef = ref => {
+        const key = refKey(ref)
+        if (matchingPageKeys.has(key)) {
+          return ref
+        }
+        return redirectsBySource.get(key) || ref
+      }
+      internalRefs = internalRefs.map(resolveRef)
 
-      // -> Apply tag to internal links for found pages
+      // -> Redirect historical paths and apply tag to internal links for found pages
       $('a.is-internal-link').each((i, elm) => {
         const href = $(elm).attr('href')
         let hrefObj = {}
+        let parsedUrl
         try {
-          const parsedUrl = new URL(`http://x${href}`)
+          parsedUrl = new URL(`http://x${href}`)
           hrefObj = pageHelper.parsePath(parsedUrl.pathname)
         } catch (err) {
           return
         }
-        if (_.some(results, r => {
-          return r.localeCode === hrefObj.locale && r.path === hrefObj.path
-        })) {
+        const resolvedRef = resolveRef({ path: hrefObj.path, localeCode: hrefObj.locale })
+        if (resolvedRef.path !== hrefObj.path || resolvedRef.localeCode !== hrefObj.locale) {
+          parsedUrl.pathname = WIKI.config.lang.namespacing ?
+            `/${resolvedRef.localeCode}/${resolvedRef.path}` :
+            `/${resolvedRef.path}`
+          $(elm).attr('href', `${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`)
+        }
+        if (validPageKeys.has(refKey(resolvedRef))) {
           $(elm).addClass(`is-valid-page`)
         } else {
           $(elm).addClass(`is-invalid-page`)

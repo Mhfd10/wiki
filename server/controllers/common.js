@@ -435,6 +435,28 @@ router.get('/*', async (req, res, next) => {
         userId: req.user.id,
         isPrivate: false
       })
+      if (!page) {
+        const redirect = await WIKI.models.pageRedirects.resolve({
+          path: pageArgs.path,
+          locale: pageArgs.locale
+        })
+        if (redirect) {
+          if (!WIKI.auth.checkAccess(req.user, ['read:pages'], {
+            path: redirect.path,
+            locale: redirect.localeCode
+          })) {
+            return res.status(403).render('unauthorized', { action: 'view' })
+          }
+          const redirectPath = WIKI.config.lang.namespacing ?
+            `/${redirect.localeCode}/${redirect.path}` :
+            `/${redirect.path}`
+          const query = !_.isEmpty(req.query) ? `?${qs.stringify(req.query)}` : ''
+          // Historical redirects can be removed when their path is reused. Prevent
+          // clients from retaining a redirect after it no longer exists.
+          res.set('Cache-Control', 'no-store')
+          return res.redirect(302, `${redirectPath}${query}`)
+        }
+      }
       pageArgs.tags = _.get(page, 'tags', [])
 
       // -> Effective Permissions

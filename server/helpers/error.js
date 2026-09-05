@@ -189,6 +189,10 @@ module.exports = {
     message: 'Destination page path already exists.',
     code: 6006
   }),
+  PageHistoricalPathCollision: CustomError('PageHistoricalPathCollision', {
+    message: 'Destination page path is currently used as a historical redirect.',
+    code: 6014
+  }),
   PageRestoreForbidden: CustomError('PageRestoreForbidden', {
     message: 'You are not authorized to restore this page version.',
     code: 6011

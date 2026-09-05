@@ -5,6 +5,7 @@ const ErrorClasses = require('../../../helpers/error')
 const Page = require('../../../models/pages')
 const PageHistory = require('../../../models/pageHistory')
 const Comment = require('../../../models/comments')
+const PageRedirect = require('../../../models/pageRedirects')
 const PageLink = require('../../../models/pageLinks')
 const Renderer = require('../../../models/renderers')
 const Tag = require('../../../models/tags')
@@ -87,6 +88,7 @@ module.exports = function pageFixture () {
       table.string('localeCode', 5)
       table.integer('authorId').unsigned()
     })
+    await require('../../../db/migrations-sqlite/2.5.129').up(knex)
     await knex.schema.createTable('pageLinks', table => {
       table.increments('id').primary()
       table.integer('pageId').unsigned()
@@ -164,6 +166,8 @@ module.exports = function pageFixture () {
 
   const getPage = path => Page.query().findOne({ path, localeCode: 'en' })
 
+  const getRedirect = path => PageRedirect.resolve({ path, locale: 'en' })
+
   const renderLink = async (page, href) => {
     return htmlCoreRenderer.render.call({
       input: `<p><a href="${href}">Link</a></p>`,
@@ -177,12 +181,14 @@ module.exports = function pageFixture () {
     })
   }
 
-  const requestHistoricalPath = async path => {
+  const requestHistoricalPath = async (path, query = {}) => {
     const route = commonRouter.stack
       .find(layer => layer.route && layer.route.path === '/*')
       .route.stack[0].handle
     const response = {
       headers: {},
+      status: jest.fn(() => response),
+      render: jest.fn(),
       set: jest.fn((name, value) => {
         response.headers[name] = value
         return response
@@ -191,7 +197,7 @@ module.exports = function pageFixture () {
     }
     const request = {
       path: `/${path}`,
-      query: {},
+      query,
       user,
       i18n: { changeLanguage: jest.fn() }
     }
@@ -245,6 +251,7 @@ module.exports = function pageFixture () {
         comments: Comment,
         pageHistory: PageHistory,
         pageLinks: PageLink,
+        pageRedirects: PageRedirect,
         pages: Page,
         renderers: Renderer,
         storage: { pageEvent: jest.fn().mockResolvedValue() },
@@ -267,6 +274,7 @@ module.exports = function pageFixture () {
     await knex('pageTags').delete()
     await knex('tags').delete()
     await knex('pageLinks').delete()
+    await knex('pageRedirects').delete()
     await knex('pageHistory').delete()
     await knex('pageTree').delete()
     await knex('pages').delete()
@@ -292,5 +300,5 @@ module.exports = function pageFixture () {
     await knex.destroy()
   })
 
-  return { user, context, insertPage, movePage, updateContent, getPage, renderLink, requestHistoricalPath, get knex () { return knex } }
+  return { user, context, insertPage, movePage, updateContent, getPage, getRedirect, renderLink, requestHistoricalPath, get knex () { return knex } }
 }

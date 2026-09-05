@@ -316,14 +316,30 @@ module.exports = class Page extends Model {
     }
     await WIKI.models.knex.transaction(async trx => {
       // -> Check for duplicate
+      // Check and claim the URL while holding the historical redirect row.
+      // The database uniqueness constraint remains the final guard against a
+      // concurrent page creation at a previously unused path.
       const dupCheck = await WIKI.models.pages.query(trx)
         .select('id')
         .where('localeCode', opts.locale)
         .where('path', opts.path)
         .first()
+      const redirectQuery = WIKI.models.pageRedirects.query(trx)
+        .select('id', 'pageId')
+        .where('localeCode', opts.locale)
+        .where('path', opts.path)
+        .first()
+      if (!String(_.get(WIKI, 'models.knex.client.config.client', '')).includes('sqlite')) {
+        redirectQuery.forUpdate()
+      }
+      const redirectCheck = await redirectQuery
       if (dupCheck) {
         throw new WIKI.Error.PageDuplicateCreate()
       }
+      if (redirectCheck) {
+        throw new WIKI.Error.PageHistoricalPathCollision()
+      }
+
       // -> Create page
       const insertedPage = await WIKI.models.pages.query(trx).insert(pageData)
 
@@ -747,9 +763,21 @@ module.exports = class Page extends Model {
       path: destinationPath,
       localeCode: opts.destinationLocale
     })
+    const redirectQuery = WIKI.models.pageRedirects.query(trx).findOne({
+      path: destinationPath,
+      localeCode: opts.destinationLocale
+    })
+    if (!String(_.get(WIKI, 'models.knex.client.config.client', '')).includes('sqlite')) {
+      redirectQuery.forUpdate()
+    }
+    const destRedirect = await redirectQuery
     if (destPage) {
       throw new WIKI.Error.PagePathCollision()
     }
+    if (destRedirect) {
+      throw new WIKI.Error.PageHistoricalPathCollision()
+    }
+
     // -> Create version snapshot
     await WIKI.models.pageHistory.addVersion({
       ...page,
@@ -770,6 +798,11 @@ module.exports = class Page extends Model {
     if (updatedPages !== 1) {
       throw new WIKI.Error.PageNotFound()
     }
+    await WIKI.models.pageRedirects.query(trx).insert({
+      path: page.path,
+      localeCode: page.localeCode,
+      pageId: page.id
+    })
 
     return {
       page,
@@ -873,13 +906,17 @@ module.exports = class Page extends Model {
       throw new WIKI.Error.PageDeleteForbidden()
     }
 
-    // -> Create version snapshot and delete page atomically
+    // -> Create version snapshot, remove redirects and delete page
     await WIKI.models.knex.transaction(async trx => {
       await WIKI.models.pageHistory.addVersion({
         ...page,
         action: 'deleted',
         versionDate: page.updatedAt
       }, trx)
+      await WIKI.models.pageRedirects.query()
+        .delete()
+        .where('pageId', page.id)
+        .transacting(trx)
       await WIKI.models.pages.query()
         .delete()
         .where('id', page.id)
@@ -923,6 +960,8 @@ module.exports = class Page extends Model {
    */
   static async reconnectLinks (opts) {
     const pageHref = `/${opts.locale}/${opts.path}`
+    const linkedPath = opts.mode === 'move' ? opts.sourcePath : opts.path
+    const linkedLocale = opts.mode === 'move' ? opts.sourceLocale : opts.locale
     let replaceArgs = {
       from: '',
       to: ''
@@ -955,8 +994,8 @@ module.exports = class Page extends Model {
         })
         .whereIn('pages.id', function () {
           this.select('pageLinks.pageId').from('pageLinks').where({
-            'pageLinks.path': opts.path,
-            'pageLinks.localeCode': opts.locale
+            'pageLinks.path': linkedPath,
+            'pageLinks.localeCode': linkedLocale
           })
         })
       affectedHashes = qryHashes.map(h => h.hash)
@@ -968,19 +1007,30 @@ module.exports = class Page extends Model {
         })
         .whereIn('pages.id', function () {
           this.select('pageLinks.pageId').from('pageLinks').where({
-            'pageLinks.path': opts.path,
-            'pageLinks.localeCode': opts.locale
+            'pageLinks.path': linkedPath,
+            'pageLinks.localeCode': linkedLocale
           })
         })
       const qryHashes = await WIKI.models.pages.query()
         .column('hash')
         .whereIn('pages.id', function () {
           this.select('pageLinks.pageId').from('pageLinks').where({
-            'pageLinks.path': opts.path,
-            'pageLinks.localeCode': opts.locale
+            'pageLinks.path': linkedPath,
+            'pageLinks.localeCode': linkedLocale
           })
         })
       affectedHashes = qryHashes.map(h => h.hash)
+    }
+    if (opts.mode === 'move') {
+      await WIKI.models.pageLinks.query()
+        .patch({
+          path: opts.path,
+          localeCode: opts.locale
+        })
+        .where({
+          path: opts.sourcePath,
+          localeCode: opts.sourceLocale
+        })
     }
     for (const hash of affectedHashes) {
       await WIKI.models.pages.deletePageFromCache(hash)
