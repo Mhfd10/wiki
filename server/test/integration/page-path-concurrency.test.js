@@ -1,8 +1,10 @@
+/** @jest-environment node */
+
 const pageFixture = require('./helpers/page-fixture')
 const Page = require('../../models/pages')
 const PageRedirect = require('../../models/pageRedirects')
 
-describe('concurrent page path claims on separate SQLite connections', () => {
+describe('concurrent page path claims on separate database connections', () => {
   const fixture = pageFixture({ concurrent: true })
   const { user, insertPage } = fixture
   const createPage = () => Page.createPage({

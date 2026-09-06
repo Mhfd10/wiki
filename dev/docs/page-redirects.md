@@ -54,6 +54,8 @@ Use `WIKI_TEST_DB=mysql` or `mariadb` with a `mysql://` URL for those engines.
 Only the database name `wiki_contribution_test` is accepted, and the test refuses
 pre-existing `pages`, `pageHistory`, or `pageRedirects` tables. Tests create and
 remove their own tables. Do not point these commands at an application database.
+The same environment variables run the separate-connection path-claim tests in
+`server/test/integration/page-path-concurrency.test.js`.
 
 Database writes commit before rendering, search, storage, and cache work.
 A synchronization error can therefore be reported after a move has committed.

@@ -1,0 +1,73 @@
+name: Page paths
+
+on:
+  pull_request:
+    paths:
+      - 'server/**'
+      - 'package.json'
+      - 'yarn.lock'
+      - '.github/workflows/page-paths.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+      - run: corepack enable
+      - run: yarn install --frozen-lockfile
+      - run: yarn jest --runInBand server/test
+
+  databases:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: postgres
+            image: postgres:16
+            port: 5432
+            url: postgres://wiki:test@127.0.0.1:15432/wiki_contribution_test
+            health: pg_isready -U wiki -d wiki_contribution_test
+          - engine: mysql
+            image: mysql:8.0
+            port: 3306
+            url: mysql://root:test@127.0.0.1:15432/wiki_contribution_test
+            health: mysqladmin ping -h 127.0.0.1 -ptest
+          - engine: mariadb
+            image: mariadb:10.11
+            port: 3306
+            url: mysql://root:test@127.0.0.1:15432/wiki_contribution_test
+            health: mariadb-admin ping -h 127.0.0.1 -ptest
+    services:
+      database:
+        image: ${{ matrix.image }}
+        env:
+          POSTGRES_USER: wiki
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: wiki_contribution_test
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: wiki_contribution_test
+        ports:
+          - 15432:${{ matrix.port }}
+        options: >-
+          --health-cmd="${{ matrix.health }}"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+      - run: corepack enable
+      - run: yarn install --frozen-lockfile
+      - run: yarn jest --runInBand server/test/db/migrations/page-redirects.integration.test.js 'server/test/integration/.*concurrency.test.js'
+        env:
+          WIKI_TEST_DB: ${{ matrix.engine }}
+          WIKI_TEST_DB_URL: ${{ matrix.url }}

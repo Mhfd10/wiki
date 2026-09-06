@@ -1,3 +1,5 @@
+/** @jest-environment node */
+
 const Knex = require('knex')
 
 const dbType = process.env.WIKI_TEST_DB || 'sqlite'

@@ -18,6 +18,15 @@ const commonRouter = require('../../../controllers/common')
 
 module.exports = function pageFixture ({ concurrent = false } = {}) {
   let temporaryDirectory
+  const dbType = concurrent ? process.env.WIKI_TEST_DB || 'sqlite' : 'sqlite'
+  const connectionUrl = process.env.WIKI_TEST_DB_URL
+  const clients = { sqlite: 'sqlite3', postgres: 'pg', mysql: 'mysql2', mariadb: 'mysql2' }
+  const tables = ['pageTags', 'tags', 'comments', 'pageLinks', 'pageRedirects', 'pageHistory', 'pageTree', 'pages', 'renderers', 'locales', 'editors', 'users']
+  let ownsSchema = false
+  if (!clients[dbType]) { throw new Error('Unsupported WIKI_TEST_DB') }
+  if (dbType !== 'sqlite' && (!connectionUrl || new URL(connectionUrl).pathname !== '/wiki_contribution_test')) {
+    throw new Error('Use a dedicated wiki_contribution_test database')
+  }
   const user = {
     id: 1,
     name: 'Test User',
@@ -61,7 +70,7 @@ module.exports = function pageFixture ({ concurrent = false } = {}) {
       table.string('contentType').notNullable()
       table.string('createdAt').notNullable()
       table.string('updatedAt').notNullable()
-      table.json('extra').notNullable().defaultTo('{}')
+      table.json('extra').notNullable()
       table.string('editorKey')
       table.string('localeCode', 5)
       table.integer('authorId').unsigned()
@@ -69,7 +78,7 @@ module.exports = function pageFixture ({ concurrent = false } = {}) {
     })
     await knex.schema.createTable('comments', table => {
       table.increments('id').primary()
-      table.integer('pageId').references('id').inTable('pages')
+      table.integer('pageId').unsigned().references('id').inTable('pages')
     })
     await knex.schema.createTable('pageHistory', table => {
       table.increments('id').primary()
@@ -91,7 +100,7 @@ module.exports = function pageFixture ({ concurrent = false } = {}) {
       table.string('localeCode', 5)
       table.integer('authorId').unsigned()
     })
-    await require('../../../db/migrations-sqlite/2.5.129').up(knex)
+    await require(dbType === 'sqlite' ? '../../../db/migrations-sqlite/2.5.129' : '../../../db/migrations/2.5.129').up(knex)
     await knex.schema.createTable('pageLinks', table => {
       table.increments('id').primary()
       table.integer('pageId').unsigned()
@@ -129,7 +138,7 @@ module.exports = function pageFixture ({ concurrent = false } = {}) {
       publishEndDate: '',
       content,
       render: `<p>${content}</p>`,
-      toc: [],
+      toc: '[]',
       contentType: 'markdown',
       extra: {},
       editorKey: 'markdown',
@@ -211,24 +220,37 @@ module.exports = function pageFixture ({ concurrent = false } = {}) {
   }
 
   beforeAll(async () => {
-    if (concurrent) {
+    if (concurrent && dbType === 'sqlite') {
       temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-concurrency-'))
     }
     knex = Knex({
-      client: 'sqlite3',
-      connection: { filename: concurrent ? path.join(temporaryDirectory, 'test.sqlite') : ':memory:' },
+      client: clients[dbType],
+      connection: dbType === 'sqlite' ? { filename: concurrent ? path.join(temporaryDirectory, 'test.sqlite') : ':memory:' } : connectionUrl,
       pool: {
         min: 1,
         max: concurrent ? 3 : 1,
         afterCreate: (connection, done) => {
-          connection.run('PRAGMA foreign_keys = ON', err => done(err, connection))
+          if (dbType === 'sqlite') {
+            connection.run('PRAGMA foreign_keys = ON', err => done(err, connection))
+          } else {
+            done(null, connection)
+          }
         }
       },
-      useNullAsDefault: true
+      useNullAsDefault: dbType === 'sqlite'
     })
-    await knex.raw('PRAGMA foreign_keys = ON')
-    if (concurrent) { await knex.raw('PRAGMA journal_mode = WAL') }
+    if (dbType === 'sqlite') {
+      await knex.raw('PRAGMA foreign_keys = ON')
+      if (concurrent) { await knex.raw('PRAGMA journal_mode = WAL') }
+    }
+    for (const table of tables) {
+      if (await knex.schema.hasTable(table)) {
+        throw new Error(`Refusing to modify existing table ${table}`)
+      }
+    }
+    ownsSchema = true
     Model.knex(knex)
+    global.WIKI = { config: { db: { type: dbType } } }
     await createSchema()
 
     global.WIKI = {
@@ -238,7 +260,7 @@ module.exports = function pageFixture ({ concurrent = false } = {}) {
         getEffectivePermissions: jest.fn()
       },
       config: {
-        db: { type: 'sqlite' },
+        db: { type: dbType },
         host: 'https://wiki.example',
         lang: { code: 'en', namespacing: false },
         pageExtensions: []
@@ -309,10 +331,15 @@ module.exports = function pageFixture ({ concurrent = false } = {}) {
 
   afterAll(async () => {
     jest.restoreAllMocks()
-    delete global.WIKI
     Model.knex(null)
+    if (ownsSchema) {
+      for (const table of tables) {
+        await knex.schema.dropTableIfExists(table)
+      }
+    }
     await knex.destroy()
     if (temporaryDirectory) { fs.rmSync(temporaryDirectory, { recursive: true }) }
+    delete global.WIKI
   })
 
   return { user, context, insertPage, movePage, updateContent, getPage, getRedirect, renderLink, requestHistoricalPath, get knex () { return knex } }
