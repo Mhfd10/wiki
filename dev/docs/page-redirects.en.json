@@ -1,0 +1,18 @@
+{
+  "common": {
+    "pageRedirect.title": "Previously used page path",
+    "pageRedirect.moveDestination": "This destination is currently a redirect to a moved page:",
+    "pageRedirect.moveWarning": "Moving this page here removes the redirect. External links and bookmarks using this address will open this page instead. Matching internal links in Markdown pages will be updated to the original destination.",
+    "pageRedirect.keep": "Keep redirect",
+    "pageRedirect.replaceAndMove": "Replace redirect and move"
+  },
+  "editor": {
+    "pageRedirect.reusing": "Reusing a previously moved page path",
+    "pageRedirect.warning": "External links and bookmarks using this address will open this new page instead of the page that previously moved from here.",
+    "pageRedirect.explanation": "This address previously belonged to a moved page. It is currently kept as a redirect to that page.",
+    "pageRedirect.destination": "Current redirect destination:",
+    "pageRedirect.rewrite": "Matching internal links in Markdown pages will be updated to the original destination. You must have permission to edit those pages.",
+    "pageRedirect.confirmWarning": "Reusing this address removes the redirect. External links, bookmarks, and search results will open your new page instead of the moved page.",
+    "pageRedirect.use": "Use this old path"
+  }
+}

@@ -61,3 +61,31 @@ Database writes commit before rendering, search, storage, and cache work.
 A synchronization error can therefore be reported after a move has committed.
 Check the current page state before retrying; a reported error is not proof of
 rollback. This series preserves that existing post-commit failure behavior.
+
+## Confirmed reuse
+
+Creating or moving to a reserved path fails unless `reuseHistoricalPath: true`
+is supplied. The editor and move dialogs request this consent explicitly.
+Reusing another page's redirect first updates matching links in referring
+Markdown pages. These edits, their history snapshots, the page mutation, and
+redirect removal commit together. Concurrently edited Markdown is re-read and
+rewritten instead of being overwritten with an old snapshot. The operation
+fails without changing anything if the author cannot edit a referring page.
+HTML and other non-Markdown page sources are not rewritten. External bookmarks
+using the reused URL now lead to its new occupant.
+
+New UI keys use the existing i18next namespaces and English defaults. Publish
+`dev/docs/page-redirects.en.json` through the translation service before release;
+for local development, this JSON is also valid YAML and may be copied to the
+ignored `server/locales/en.yml` file.
+
+On a disposable, initialized wiki with the setup test account, run the browser
+scenarios and capture dialog screenshots using:
+
+```sh
+yarn cypress run --env pageRedirects=true --spec dev/cypress/integration/zz-page-redirects.spec.js
+```
+
+Set `wikiUsername` and `wikiPassword` through Cypress environment configuration
+for a different test account. The suite creates uniquely named pages and deletes
+them after testing. Do not enable it against a production wiki.

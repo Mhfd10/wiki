@@ -20,6 +20,7 @@
           text
           color='green'
           @click.exact='save'
+          data-testid='save-page'
           @click.ctrl.exact='saveAndClose'
           :class='{ "is-icon": $vuetify.breakpoint.mdAndDown }'
           )
@@ -30,6 +31,7 @@
           text
           color='blue'
           @click='openPropsModal'
+          data-testid='page-properties'
           :class='{ "is-icon": $vuetify.breakpoint.mdAndDown, "mx-0": !welcomeMode, "ml-0": welcomeMode }'
           )
           v-icon(color='blue', :left='$vuetify.breakpoint.lgAndUp') mdi-tag-text-outline
@@ -45,6 +47,14 @@
           span.white--text(v-if='$vuetify.breakpoint.lgAndUp') {{ $t('common:actions.close') }}
         v-divider.ml-3(vertical)
     v-main
+      v-alert.ma-4(
+        v-if='reuseHistoricalPath'
+        type='warning'
+        prominent
+        border='left'
+        )
+        strong {{ $t('editor:pageRedirect.reusing', { defaultValue: "Reusing a previously moved page path" }) }}
+        .body-2 {{ $t('editor:pageRedirect.warning', { defaultValue: "External links and bookmarks using this address will open this new page instead of the page that previously moved from here." }) }}
       component(:is='currentEditor', :save='save')
       editor-modal-properties(v-model='dialogProps')
       editor-modal-editorselect(v-model='dialogEditorSelector')
@@ -52,6 +62,20 @@
       component(:is='activeModal')
 
     loader(v-model='dialogProgress', :title='$t(`editor:save.processing`)', :subtitle='$t(`editor:save.pleaseWait`)')
+    v-dialog(v-model='dialogHistoricalPath', persistent, max-width='640')
+      v-card
+        v-card-title.warning.white--text
+          v-icon.mr-3(dark) mdi-alert
+          span {{ $t('common:pageRedirect.title', { defaultValue: "Previously used page path" }) }}
+        v-card-text.pt-5
+          p {{ $t('editor:pageRedirect.explanation', { defaultValue: "This address previously belonged to a moved page. It is currently kept as a redirect to that page." }) }}
+          p(v-if='visibleHistoricalPathTarget') {{ $t('editor:pageRedirect.destination', { defaultValue: "Current redirect destination:" }) }} #[strong {{ visibleHistoricalPathTarget }}]
+          p {{ $t('editor:pageRedirect.rewrite', { defaultValue: "Matching internal links in Markdown pages will be updated to the original destination. You must have permission to edit those pages." }) }}
+          p.mb-0 {{ $t('editor:pageRedirect.confirmWarning', { defaultValue: "Reusing this address removes the redirect. External links, bookmarks, and search results will open your new page instead of the moved page." }) }}
+        v-card-actions
+          v-spacer
+          v-btn(text, @click='keepHistoricalRedirect', data-testid='keep-redirect') {{ $t('common:pageRedirect.keep', { defaultValue: "Keep redirect" }) }}
+          v-btn(color='warning', @click='confirmHistoricalPathReuse', data-testid='reuse-historical-path') {{ $t('editor:pageRedirect.use', { defaultValue: "Use this old path" }) }}
     notify
 </template>
 
@@ -152,6 +176,14 @@ export default {
     effectivePermissions: {
       type: String,
       default: ''
+    },
+    isHistoricalPath: {
+      type: Boolean,
+      default: false
+    },
+    historicalPathTarget: {
+      type: String,
+      default: ''
     }
   },
   data() {
@@ -161,9 +193,13 @@ export default {
       dialogProps: false,
       dialogProgress: false,
       dialogEditorSelector: false,
+      dialogHistoricalPath: false,
       dialogUnsaved: false,
       exitConfirmed: false,
       initContentParsed: '',
+      historicalPathConsent: '',
+      historicalPathPrompt: '',
+      saveAfterHistoricalConfirmation: false,
       savedState: {
         description: '',
         isPublished: false,
@@ -177,6 +213,15 @@ export default {
     }
   },
   computed: {
+    destinationKey() {
+      return JSON.stringify([this.$store.get('page/locale'), this.$store.get('page/path')])
+    },
+    reuseHistoricalPath() {
+      return this.historicalPathConsent === this.destinationKey
+    },
+    visibleHistoricalPathTarget() {
+      return this.destinationKey === JSON.stringify([this.locale, this.path]) ? this.historicalPathTarget : ''
+    },
     currentEditor: sync('editor/editor'),
     activeModal: sync('editor/activeModal'),
     mode: get('editor/mode'),
@@ -201,6 +246,14 @@ export default {
     }
   },
   watch: {
+    destinationKey(newValue) {
+      if (this.historicalPathConsent !== newValue) {
+        this.historicalPathConsent = ''
+      }
+      if (this.historicalPathPrompt !== newValue) {
+        this.dialogHistoricalPath = false
+      }
+    },
     currentEditor(newValue, oldValue) {
       if (newValue !== '' && this.mode === 'create') {
         _.delay(() => {
@@ -240,7 +293,10 @@ export default {
 
     this.initContentParsed = this.initContent ? Base64.decode(this.initContent) : ''
     this.$store.set('editor/content', this.initContentParsed)
-    if (this.mode === 'create' && !this.initEditor) {
+    if (this.mode === 'create' && this.isHistoricalPath) {
+      this.historicalPathPrompt = this.destinationKey
+      this.dialogHistoricalPath = true
+    } else if (this.mode === 'create' && !this.initEditor) {
       _.delay(() => {
         this.dialogEditorSelector = true
       }, 500)
@@ -276,6 +332,28 @@ export default {
     openConflict() {
       this.$root.$emit('saveConflict')
     },
+    keepHistoricalRedirect() {
+      const returnToRedirect = !this.saveAfterHistoricalConfirmation
+      this.dialogHistoricalPath = false
+      this.saveAfterHistoricalConfirmation = false
+      this.historicalPathPrompt = ''
+      if (returnToRedirect) {
+        window.location.assign(this.visibleHistoricalPathTarget || '/')
+      }
+    },
+    confirmHistoricalPathReuse() {
+      this.dialogHistoricalPath = false
+      if (this.historicalPathPrompt !== this.destinationKey) { return }
+      this.historicalPathConsent = this.destinationKey
+      if (this.saveAfterHistoricalConfirmation) {
+        this.saveAfterHistoricalConfirmation = false
+        this.save()
+      } else if (!this.initEditor) {
+        this.dialogEditorSelector = true
+      } else {
+        this.currentEditor = `editor${_.startCase(this.initEditor)}`
+      }
+    },
     async save({ rethrow = false, overwrite = false } = {}) {
       this.showProgressDialog('saving')
       this.isSaving = true
@@ -302,6 +380,7 @@ export default {
                 $path: String!
                 $publishEndDate: Date
                 $publishStartDate: Date
+                $reuseHistoricalPath: Boolean!
                 $scriptCss: String
                 $scriptJs: String
                 $tags: [String]!
@@ -318,6 +397,7 @@ export default {
                     path: $path
                     publishEndDate: $publishEndDate
                     publishStartDate: $publishStartDate
+                    reuseHistoricalPath: $reuseHistoricalPath
                     scriptCss: $scriptCss
                     scriptJs: $scriptJs
                     tags: $tags
@@ -347,6 +427,7 @@ export default {
               path: this.$store.get('page/path'),
               publishEndDate: this.$store.get('page/publishEndDate') || '',
               publishStartDate: this.$store.get('page/publishStartDate') || '',
+              reuseHistoricalPath: this.reuseHistoricalPath,
               scriptCss: this.$store.get('page/scriptCss'),
               scriptJs: this.$store.get('page/scriptJs'),
               tags: this.$store.get('page/tags'),
@@ -367,7 +448,9 @@ export default {
             this.exitConfirmed = true
             window.location.assign(`/${this.$store.get('page/locale')}/${this.$store.get('page/path')}`)
           } else {
-            throw new Error(_.get(resp, 'responseResult.message'))
+            const error = new Error(_.get(resp, 'responseResult.message'))
+            error.slug = _.get(resp, 'responseResult.slug')
+            throw error
           }
         } else {
           // --------------------------------------------
@@ -480,11 +563,18 @@ export default {
         this.initContentParsed = this.$store.get('editor/content')
         this.setCurrentSavedState()
       } catch (err) {
-        this.$store.commit('showNotification', {
-          message: err.message,
-          style: 'error',
-          icon: 'warning'
-        })
+        if (this.mode === 'create' && err.slug === 'PageHistoricalPathCollision') {
+          this.historicalPathConsent = ''
+          this.historicalPathPrompt = this.destinationKey
+          this.saveAfterHistoricalConfirmation = true
+          this.dialogHistoricalPath = true
+        } else {
+          this.$store.commit('showNotification', {
+            message: err.message,
+            style: 'error',
+            icon: 'warning'
+          })
+        }
         if (rethrow === true) {
           clearTimeout(saveTimeoutHandle)
           this.isSaving = false

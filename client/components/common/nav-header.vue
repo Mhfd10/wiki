@@ -132,6 +132,7 @@
                       tile
                       height='64'
                       :aria-label='$t(`common:header.pageActions`)'
+                      data-testid='page-actions'
                       )
                       v-icon(color='grey') mdi-file-document-edit-outline
                   span {{$t('common:header.pageActions')}}
@@ -156,7 +157,7 @@
                 v-list-item.pl-4(@click='pageDuplicate', v-if='hasWritePagesPermission')
                   v-list-item-avatar(size='24', tile): v-icon(color='indigo') mdi-content-duplicate
                   v-list-item-title.body-2 {{$t('common:header.duplicate')}}
-                v-list-item.pl-4(@click='pageMove', v-if='hasManagePagesPermission')
+                v-list-item.pl-4(@click='pageMove', data-testid='move-page', v-if='hasManagePagesPermission')
                   v-list-item-avatar(size='24', tile): v-icon(color='indigo') mdi-content-save-move-outline
                   v-list-item-content
                     v-list-item-title.body-2 {{$t('common:header.move')}}
@@ -237,7 +238,7 @@
             span {{$t('common:header.login')}}
 
     page-selector(mode='create', v-model='newPageModal', :open-handler='pageNewCreate', :locale='locale')
-    page-selector(mode='move', v-model='movePageModal', :open-handler='pageMoveRename', :path='path', :locale='locale')
+    page-move(v-model='movePageModal', v-if='path && path.length')
     page-selector(mode='create', v-model='duplicateOpts.modal', :open-handler='pageDuplicateHandle', :path='duplicateOpts.path', :locale='duplicateOpts.locale')
     page-delete(v-model='deletePageModal', v-if='path && path.length')
     page-convert(v-model='convertPageModal', v-if='path && path.length')
@@ -253,14 +254,13 @@
 import { get, sync } from 'vuex-pathify'
 import _ from 'lodash'
 
-import movePageMutation from 'gql/common/common-pages-mutation-move.gql'
-
 /* global siteConfig, siteLangs */
 
 export default {
   components: {
     PageDelete: () => import('./page-delete.vue'),
-    PageConvert: () => import('./page-convert.vue')
+    PageConvert: () => import('./page-convert.vue'),
+    PageMove: () => import('./page-move.vue')
   },
   props: {
     dense: {
@@ -430,27 +430,6 @@ export default {
     },
     pageMove () {
       this.movePageModal = true
-    },
-    async pageMoveRename ({ path, locale }) {
-      this.$store.commit(`loadingStart`, 'page-move')
-      try {
-        const resp = await this.$apollo.mutate({
-          mutation: movePageMutation,
-          variables: {
-            id: this.$store.get('page/id'),
-            destinationLocale: locale,
-            destinationPath: path
-          }
-        })
-        if (_.get(resp, 'data.pages.move.responseResult.succeeded', false)) {
-          window.location.replace(`/${locale}/${path}`)
-        } else {
-          throw new Error(_.get(resp, 'data.pages.move.responseResult.message', this.$t('common:error.unexpected')))
-        }
-      } catch (err) {
-        this.$store.commit('pushGraphError', err)
-        this.$store.commit(`loadingStop`, 'page-move')
-      }
     },
     pageDelete () {
       this.deletePageModal = true

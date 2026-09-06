@@ -1,6 +1,6 @@
-mutation($id: Int!, $destinationPath: String!, $destinationLocale: String!) {
+mutation($id: Int!, $destinationPath: String!, $destinationLocale: String!, $reuseHistoricalPath: Boolean!) {
   pages {
-    move(id: $id, destinationPath: $destinationPath, destinationLocale: $destinationLocale) {
+    move(id: $id, destinationPath: $destinationPath, destinationLocale: $destinationLocale, reuseHistoricalPath: $reuseHistoricalPath) {
       responseResult {
         succeeded
         errorCode
