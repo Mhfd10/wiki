@@ -38,10 +38,26 @@ module.exports = {
         path: page.path,
         locale: page.localeCode
       })) {
-        return WIKI.models.pageHistory.getVersion({
+        const version = await WIKI.models.pageHistory.getVersion({
           pageId: args.pageId,
           versionId: args.versionId
         })
+        if (!version) {
+          return null
+        }
+
+        const canRestorePath = await WIKI.models.pageRedirects.canRestorePath({
+          pageId: args.pageId,
+          currentPath: page.path,
+          currentLocale: page.localeCode,
+          path: version.path,
+          locale: version.locale
+        })
+
+        return {
+          ...version,
+          canRestorePath
+        }
       } else {
         throw new WIKI.Error.PageHistoryForbidden()
       }
@@ -594,9 +610,35 @@ module.exports = {
           throw new WIKI.Error.PageNotFound()
         }
 
+        const restorePath = args.restorePath === true
+        if (restorePath) {
+          const canRestorePath = await WIKI.models.pageRedirects.canRestorePath({
+            pageId: args.pageId,
+            currentPath: page.path,
+            currentLocale: page.localeCode,
+            path: targetVersion.path,
+            locale: targetVersion.locale
+          })
+          if (!canRestorePath) {
+            throw new WIKI.Error.PageHistoricalPathCollision()
+          }
+          if (!WIKI.auth.checkAccess(context.req.user, ['manage:pages'], {
+            path: page.path,
+            locale: page.localeCode
+          }) || !WIKI.auth.checkAccess(context.req.user, ['write:pages'], {
+            path: targetVersion.path,
+            locale: targetVersion.locale
+          })) {
+            throw new WIKI.Error.PageMoveForbidden()
+          }
+        }
+
         await WIKI.models.pages.updatePage({
           ...targetVersion,
           id: targetVersion.pageId,
+          path: restorePath ? targetVersion.path : page.path,
+          locale: restorePath ? targetVersion.locale : page.localeCode,
+          reclaimOwnHistoricalPath: restorePath,
           user: context.req.user,
           action: 'restored'
         })

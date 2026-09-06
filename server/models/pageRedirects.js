@@ -1,5 +1,7 @@
 const Model = require('objection').Model
 
+/* global WIKI */
+
 /**
  * Page Redirects model
  */
@@ -23,6 +25,30 @@ module.exports = class PageRedirect extends Model {
 
   $beforeInsert() {
     this.createdAt = new Date().toISOString()
+  }
+
+  /**
+   * Check whether a page can return to a historical path by consuming its
+   * redirect. The destination must be unoccupied and the redirect must still
+   * belong to the page being restored.
+   *
+   * @param {Object} opts Restore path properties
+   * @returns {Promise<boolean>} Whether the historical path can be restored
+   */
+  static async canRestorePath ({ pageId, currentPath, currentLocale, path, locale }) {
+    if (path === currentPath && locale === currentLocale) {
+      return false
+    }
+
+    const [destinationPage, destinationRedirect] = await Promise.all([
+      WIKI.models.pages.query().findOne({
+        path,
+        localeCode: locale
+      }),
+      this.resolve({ path, locale })
+    ])
+
+    return Boolean(!destinationPage && destinationRedirect && destinationRedirect.pageId === pageId)
   }
 
   /**

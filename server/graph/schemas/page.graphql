@@ -168,6 +168,11 @@ type PageMutation {
   restore(
     pageId: Int!
     versionId: Int!
+    """
+    Restore the selected version's path as well as its content. This only
+    reclaims a historical redirect that still belongs to the same page.
+    """
+    restorePath: Boolean = false
   ): DefaultResponse @auth(requires: ["write:pages", "manage:pages", "manage:system"])
 
   purgeHistory (
@@ -241,6 +246,11 @@ type PageVersion {
   action: String!
   authorId: String!
   authorName: String!
+  """
+  Whether the selected version's path is still reserved as a historical
+  redirect belonging to this page and can therefore be restored.
+  """
+  canRestorePath: Boolean!
   content: String!
   contentType: String!
   createdAt: Date!

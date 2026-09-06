@@ -525,6 +525,7 @@ module.exports = class Page extends Model {
           id: updatedPage.id,
           destinationLocale: opts.locale,
           destinationPath: opts.path,
+          reclaimOwnHistoricalPath: opts.reclaimOwnHistoricalPath,
           reuseHistoricalPath: opts.reuseHistoricalPath,
           user: opts.user
         }, trx)
@@ -752,7 +753,9 @@ module.exports = class Page extends Model {
   /**
    * Apply a page move using an existing transaction.
    *
-   * Reusing a historical destination requires explicit caller consent.
+   * `reuseHistoricalPath` is explicit caller consent to replace any historical
+   * redirect. `reclaimOwnHistoricalPath` is reserved for version restoration
+   * and only permits a redirect that still belongs to this page.
    *
    * @param {Object} opts Page properties
    * @param {Object} trx Database transaction
@@ -826,10 +829,14 @@ module.exports = class Page extends Model {
     }
     const destRedirect = await redirectQuery
     const reuseHistoricalPath = opts.reuseHistoricalPath === true
+    const reclaimOwnHistoricalPath = opts.reclaimOwnHistoricalPath === true
     if (destPage) {
       throw new WIKI.Error.PagePathCollision()
     }
-    if (destRedirect && !reuseHistoricalPath) {
+    if (reclaimOwnHistoricalPath && (!destRedirect || destRedirect.pageId !== page.id)) {
+      throw new WIKI.Error.PageHistoricalPathCollision()
+    }
+    if (destRedirect && !reuseHistoricalPath && !reclaimOwnHistoricalPath) {
       throw new WIKI.Error.PageHistoricalPathCollision()
     }
 
@@ -856,7 +863,7 @@ module.exports = class Page extends Model {
       user: opts.user,
       trx
     })
-    if (destRedirect && reuseHistoricalPath) {
+    if (destRedirect && (reuseHistoricalPath || reclaimOwnHistoricalPath)) {
       const deletedRedirects = await WIKI.models.pageRedirects.query(trx).deleteById(destRedirect.id)
       if (deletedRedirects !== 1) {
         throw new WIKI.Error.PageHistoricalPathCollision()
