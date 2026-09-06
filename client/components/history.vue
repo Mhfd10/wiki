@@ -41,7 +41,7 @@
                     v-spacer
                     v-menu(offset-x, left)
                       template(v-slot:activator='{ on }')
-                        v-btn.mr-2.radius-4(icon, v-on='on', small, tile): v-icon mdi-dots-horizontal
+                        v-btn.mr-2.radius-4(icon, v-on='on', small, tile, data-testid='history-actions', :data-version-id='ph.versionId'): v-icon mdi-dots-horizontal
                       v-list(dense, nav).history-promptmenu
                         v-list-item(@click='setDiffSource(ph.versionId)', :disabled='(ph.versionId >= diffTarget && diffTarget !== 0) || ph.versionId === 0')
                           v-list-item-avatar(size='24'): v-avatar A
@@ -55,7 +55,7 @@
                         v-list-item(@click='download(ph.versionId)')
                           v-list-item-avatar(size='24'): v-icon mdi-cloud-download-outline
                           v-list-item-title Download Version
-                        v-list-item(@click='restore(ph.versionId, ph.versionDate)', :disabled='ph.versionId === 0')
+                        v-list-item(@click='restore(ph.versionId, ph.versionDate)', :disabled='ph.versionId === 0', data-testid='restore-version', :data-version-id='ph.versionId')
                           v-list-item-avatar(size='24'): v-icon(:disabled='ph.versionId === 0') mdi-history
                           v-list-item-title Restore
                         v-list-item(@click='branchOff(ph.versionId)')
@@ -117,10 +117,30 @@
         v-card-text.pa-4
           i18next(tag='span', path='history:restore.confirmText')
             strong(place='date') {{ restoreTarget.versionDate | moment('LLL') }}
+          template(v-if='restoreTargetCanRestorePath')
+            v-alert.mt-4.mb-0(type='info', outlined)
+              .body-2 {{ $t('history:restore.previousPath', { defaultValue: "This version used a different path:" }) }} #[strong /{{restoreTarget.path}}]
+              .body-2.mt-2 {{ $t('history:restore.choose', { defaultValue: "Choose whether to restore that path too, or restore only the content at the current path." }) }}
         v-card-actions
           v-spacer
           v-btn(text, @click='isRestoreConfirmDialogShown = false', :disabled='restoreLoading') {{$t('common:actions.cancel')}}
-          v-btn(color='orange darken-2', dark, @click='restoreConfirm', :loading='restoreLoading') {{$t('history:restore.confirmButton')}}
+          template(v-if='restoreTargetCanRestorePath')
+            v-btn(color='orange darken-2', outlined, @click='restoreConfirm(false)', :disabled='restoreLoading', data-testid='restore-content-only') {{ $t('history:restore.contentOnly', { defaultValue: "Restore content only" }) }}
+            v-btn(color='orange darken-2', dark, @click='restoreConfirm(true)', :loading='restoreLoading', data-testid='restore-content-and-path') {{ $t('history:restore.contentAndPath', { defaultValue: "Restore content and path" }) }}
+          v-btn(v-else, color='orange darken-2', dark, @click='restoreConfirm(false)', :loading='restoreLoading') {{$t('history:restore.confirmButton')}}
+
+    v-dialog(v-model='isRestorePathCollisionDialogShown', max-width='650', persistent)
+      v-card
+        .dialog-header.is-orange
+          v-icon.mr-3(dark) mdi-alert
+          span {{ $t('history:restore.unavailable', { defaultValue: "Historical path no longer available" }) }}
+        v-card-text.pa-4
+          p {{ $t('history:restore.claimed', { defaultValue: "The historical path was claimed before the restore could be completed. Nothing has been restored." }) }} #[strong /{{restoreTarget.locale}}/{{restoreTarget.path}}]
+          p.mb-0 {{ $t('history:restore.fallback', { defaultValue: "You can cancel, or restore only the content at the current path:" }) }} #[strong /{{locale}}/{{path}}]
+        v-card-actions
+          v-spacer
+          v-btn(text, @click='isRestorePathCollisionDialogShown = false', :disabled='restoreLoading') {{$t('common:actions.cancel')}}
+          v-btn(color='orange darken-2', dark, @click='restoreContentAfterPathCollision', :loading='restoreLoading', data-testid='restore-content-after-collision') {{ $t('history:restore.contentOnly', { defaultValue: "Restore content only" }) }}
 
     page-selector(mode='create', v-model='branchOffOpts.modal', :open-handler='branchOffHandle', :path='branchOffOpts.path', :locale='branchOffOpts.locale')
 
@@ -214,7 +234,10 @@ export default {
       cache: [],
       restoreTarget: {
         versionId: 0,
-        versionDate: ''
+        versionDate: '',
+        path: '',
+        locale: '',
+        canRestorePath: false
       },
       branchOffOpts: {
         versionId: 0,
@@ -223,6 +246,7 @@ export default {
         modal: false
       },
       isRestoreConfirmDialogShown: false,
+      isRestorePathCollisionDialogShown: false,
       restoreLoading: false
     }
   },
@@ -260,6 +284,9 @@ export default {
         matching: 'lines',
         outputFormat: this.viewMode
       })
+    },
+    restoreTargetCanRestorePath () {
+      return this.restoreTarget.canRestorePath === true
     }
   },
   watch: {
@@ -336,6 +363,7 @@ export default {
                 action
                 authorId
                 authorName
+                canRestorePath
                 content
                 contentType
                 createdAt
@@ -376,22 +404,29 @@ export default {
     download (versionId) {
       window.location.assign(`/d/${this.locale}/${this.path}?v=${versionId}`)
     },
-    restore (versionId, versionDate) {
+    async restore (versionId, versionDate) {
+      let targetVersion = _.find(this.cache, { versionId })
+      if (!targetVersion) {
+        targetVersion = await this.loadVersion(versionId)
+      }
       this.restoreTarget = {
         versionId,
-        versionDate
+        versionDate,
+        path: targetVersion.path || this.path,
+        locale: targetVersion.locale || this.locale,
+        canRestorePath: targetVersion.canRestorePath === true
       }
       this.isRestoreConfirmDialogShown = true
     },
-    async restoreConfirm () {
+    async restoreConfirm (restorePath) {
       this.restoreLoading = true
       this.$store.commit(`loadingStart`, 'history-restore')
       try {
         const resp = await this.$apollo.mutate({
           mutation: gql`
-            mutation ($pageId: Int!, $versionId: Int!) {
+            mutation ($pageId: Int!, $versionId: Int!, $restorePath: Boolean!) {
               pages {
-                restore (pageId: $pageId, versionId: $versionId) {
+                restore (pageId: $pageId, versionId: $versionId, restorePath: $restorePath) {
                   responseResult {
                     succeeded
                     errorCode
@@ -404,21 +439,29 @@ export default {
           `,
           variables: {
             versionId: this.restoreTarget.versionId,
-            pageId: this.pageId
+            pageId: this.pageId,
+            restorePath
           }
         })
-        if (_.get(resp, 'data.pages.restore.responseResult.succeeded', false) === true) {
+        const result = _.get(resp, 'data.pages.restore.responseResult', {})
+        if (result.succeeded === true) {
           this.$store.commit('showNotification', {
             style: 'success',
             message: this.$t('history:restore.success'),
             icon: 'check'
           })
           this.isRestoreConfirmDialogShown = false
+          this.isRestorePathCollisionDialogShown = false
           setTimeout(() => {
-            window.location.assign(`/${this.locale}/${this.path}`)
+            const destinationLocale = restorePath ? this.restoreTarget.locale : this.locale
+            const destinationPath = restorePath ? this.restoreTarget.path : this.path
+            window.location.assign(`/${destinationLocale}/${destinationPath}`)
           }, 1000)
+        } else if (restorePath && ['PageHistoricalPathCollision', 'PagePathCollision'].includes(result.slug)) {
+          this.isRestoreConfirmDialogShown = false
+          this.isRestorePathCollisionDialogShown = true
         } else {
-          throw new Error(_.get(resp, 'data.pages.restore.responseResult.message', 'An unexpected error occurred'))
+          throw new Error(result.message || this.$t('common:error.unexpected'))
         }
       } catch (err) {
         this.$store.commit('showNotification', {
@@ -429,6 +472,10 @@ export default {
       }
       this.$store.commit(`loadingStop`, 'history-restore')
       this.restoreLoading = false
+    },
+    restoreContentAfterPathCollision () {
+      this.isRestorePathCollisionDialogShown = false
+      this.restoreConfirm(false)
     },
     branchOff (versionId) {
       const pathParts = this.path.split('/')

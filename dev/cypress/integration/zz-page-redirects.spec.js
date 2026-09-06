@@ -1,4 +1,4 @@
-import { login, createPage, movePage, deletePage, graph } from '../support/page-fixtures'
+import { login, createPage, movePage, deletePage, findVersionAtPath, graph } from '../support/page-fixtures'
 
 // Run explicitly against an initialized disposable wiki; setup-only CI remains unchanged.
 const describeFeature = Cypress.env('pageRedirects') ? describe : describe.skip
@@ -7,6 +7,7 @@ describeFeature('Historical path confirmation dialogs', () => {
   let oldPath
   let currentPath
   let replacementPath
+  let originalPageId
   const pageIds = []
 
   before(() => login())
@@ -18,6 +19,7 @@ describeFeature('Historical path confirmation dialogs', () => {
     currentPath = `${prefix}-current`
     replacementPath = `${prefix}-replacement`
     createPage(oldPath).then(id => {
+      originalPageId = id
       pageIds.push(id)
       return movePage(id, currentPath)
     })
@@ -109,5 +111,18 @@ describeFeature('Historical path confirmation dialogs', () => {
     cy.screenshot('historical-path-move-confirmation')
     cy.get('[data-testid="replace-redirect-and-move"]').click()
     cy.location('pathname').should('include', oldPath)
+  })
+
+  it('restores a historical path with its page content', () => {
+    findVersionAtPath(originalPageId, oldPath).then(versionId => {
+      cy.visit(`/h/en/${currentPath}`)
+      cy.get(`[data-testid="history-actions"][data-version-id="${versionId}"]`).click()
+      cy.get(`[data-testid="restore-version"][data-version-id="${versionId}"]`).click()
+      cy.get('[data-testid="restore-content-and-path"]').should('be.visible')
+      cy.screenshot('historical-path-restoration-confirmation')
+      cy.get('[data-testid="restore-content-and-path"]').click()
+      cy.location('pathname', { timeout: 10000 }).should('include', oldPath)
+      cy.request({ url: `/${currentPath}`, followRedirect: false }).its('status').should('eq', 302)
+    })
   })
 })

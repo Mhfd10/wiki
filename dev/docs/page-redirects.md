@@ -89,3 +89,13 @@ yarn cypress run --env pageRedirects=true --spec dev/cypress/integration/zz-page
 Set `wikiUsername` and `wikiPassword` through Cypress environment configuration
 for a different test account. The suite creates uniquely named pages and deletes
 them after testing. Do not enable it against a production wiki.
+
+## Historical restoration
+
+History queries report `canRestorePath` only when the selected version's URL is
+still reserved by a redirect owned by the same page and no live page occupies
+it. Restores remain content-only by default. Supplying `restorePath: true`
+restores the selected content and URL atomically, after checking manage access
+at the current URL and write access at the historical URL. The ownership check
+is repeated while the destination is locked, so a stale confirmation cannot
+consume another page's redirect.

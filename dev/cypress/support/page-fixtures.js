@@ -41,3 +41,18 @@ export const movePage = (id, path) => graph(`mutation ($id: Int!, $path: String!
 export const deletePage = id => graph(`mutation ($id: Int!) {
   pages { delete(id: $id) { responseResult { succeeded message } } }
 }`, { id })
+
+export const findVersionAtPath = (pageId, path) => graph(`query ($pageId: Int!) {
+  pages { history(id: $pageId, offsetPage: 0, offsetSize: 100) {
+    trail { versionId }
+  } }
+}`, { pageId }).then(({ pages }) => {
+  const fields = pages.history.trail.map(({ versionId }, index) =>
+    `v${index}: version(pageId: ${pageId}, versionId: ${versionId}) { versionId path }`
+  ).join('\n')
+  return graph(`query { pages { ${fields} } }`).then(({ pages: versions }) => {
+    const version = Object.values(versions).find(candidate => candidate.path === path)
+    expect(version, `history version at ${path}`).to.not.equal(undefined)
+    return version.versionId
+  })
+})

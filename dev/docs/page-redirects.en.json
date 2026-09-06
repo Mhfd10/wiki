@@ -14,5 +14,14 @@
     "pageRedirect.rewrite": "Matching internal links in Markdown pages will be updated to the original destination. You must have permission to edit those pages.",
     "pageRedirect.confirmWarning": "Reusing this address removes the redirect. External links, bookmarks, and search results will open your new page instead of the moved page.",
     "pageRedirect.use": "Use this old path"
+  },
+  "history": {
+    "restore.previousPath": "This version used a different path:",
+    "restore.choose": "Choose whether to restore that path too, or restore only the content at the current path.",
+    "restore.contentOnly": "Restore content only",
+    "restore.contentAndPath": "Restore content and path",
+    "restore.unavailable": "Historical path no longer available",
+    "restore.claimed": "The historical path was claimed before the restore could be completed. Nothing has been restored.",
+    "restore.fallback": "You can cancel, or restore only the content at the current path:"
   }
 }
