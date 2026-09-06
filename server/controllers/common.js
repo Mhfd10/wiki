@@ -161,6 +161,8 @@ router.get(['/e', '/e/*'], async (req, res, next) => {
     _.set(res.locals, 'pageMeta.description', page.description)
     page.mode = 'update'
     page.isPublished = (page.isPublished === true || page.isPublished === 1) ? 'true' : 'false'
+    page.isHistoricalPath = 'false'
+    page.historicalPathTarget = ''
     page.content = Buffer.from(page.content).toString('base64')
   } else {
     // -> CREATE MODE
@@ -168,6 +170,20 @@ router.get(['/e', '/e/*'], async (req, res, next) => {
       _.set(res.locals, 'pageMeta.title', 'Unauthorized')
       return res.status(403).render('unauthorized', { action: 'create' })
     }
+
+    const historicalPathTarget = await WIKI.models.pageRedirects.resolve({
+      path: pageArgs.path,
+      locale: pageArgs.locale
+    })
+    const canReadHistoricalTarget = historicalPathTarget && WIKI.auth.checkAccess(req.user, ['read:pages'], {
+      path: historicalPathTarget.path,
+      locale: historicalPathTarget.localeCode
+    })
+    const historicalPathTargetUrl = canReadHistoricalTarget ?
+      WIKI.config.lang.namespacing ?
+        `/${historicalPathTarget.localeCode}/${historicalPathTarget.path}` :
+        `/${historicalPathTarget.path}` :
+      ''
 
     _.set(res.locals, 'pageMeta.title', `New Page`)
     page = {
@@ -178,6 +194,8 @@ router.get(['/e', '/e/*'], async (req, res, next) => {
       content: null,
       title: null,
       description: null,
+      isHistoricalPath: historicalPathTarget ? 'true' : 'false',
+      historicalPathTarget: historicalPathTargetUrl,
       updatedAt: new Date().toISOString(),
       extra: {
         css: '',

@@ -12,6 +12,8 @@ const CleanCSS = require('clean-css')
 const TurndownService = require('turndown')
 const turndownPluginGfm = require('@joplin/turndown-plugin-gfm').gfm
 const cheerio = require('cheerio')
+const markdownHelper = require('../helpers/markdown')
+const URL = require('url').URL
 
 /* global WIKI */
 
@@ -265,10 +267,14 @@ module.exports = class Page extends Model {
       throw new WIKI.Error.PageDeleteForbidden()
     }
 
+    const reuseHistoricalPath = opts.reuseHistoricalPath === true
+
     // -> Check for empty content
     if (!opts.content || _.trim(opts.content).length < 1) {
       throw new WIKI.Error.PageEmptyContent()
     }
+
+    let historicalLinkRewrites = []
 
     // -> Format CSS Scripts
     let scriptCss = ''
@@ -292,7 +298,7 @@ module.exports = class Page extends Model {
       scriptJs = opts.scriptJs || ''
     }
 
-    // -> Create page and its tag associations atomically
+    // -> Create page and release the historical redirect, if explicitly confirmed
     const pageData = {
       authorId: opts.user.id,
       content: opts.content,
@@ -338,9 +344,21 @@ module.exports = class Page extends Model {
       if (dupCheck) {
         throw new WIKI.Error.PageDuplicateCreate()
       }
-      if (redirectCheck) {
+      if (redirectCheck && !reuseHistoricalPath) {
         throw new WIKI.Error.PageHistoricalPathCollision()
       }
+
+      historicalLinkRewrites = (redirectCheck && reuseHistoricalPath) ?
+        await WIKI.models.pages.getHistoricalLinkRewrites({
+          sourcePath: opts.path,
+          sourceLocale: opts.locale,
+          trx
+        }) : []
+      historicalLinkRewrites = await WIKI.models.pages.applyHistoricalLinkRewrites(historicalLinkRewrites, {
+        authorId: opts.user.id,
+        user: opts.user,
+        trx
+      })
 
       // -> Create page
       const insertedPage = await WIKI.models.pages.query(trx).insert(pageData)
@@ -348,6 +366,12 @@ module.exports = class Page extends Model {
       // -> Save Tags
       if (opts.tags && opts.tags.length > 0) {
         await WIKI.models.tags.associateTags({ tags: opts.tags, page: insertedPage, trx })
+      }
+      if (redirectCheck && reuseHistoricalPath) {
+        const deletedRedirects = await WIKI.models.pageRedirects.query(trx).deleteById(redirectCheck.id)
+        if (deletedRedirects !== 1) {
+          throw new WIKI.Error.PageHistoricalPathCollision()
+        }
       }
     })
     const page = await WIKI.models.pages.getPageFromDb({
@@ -385,6 +409,11 @@ module.exports = class Page extends Model {
 
     // -> Get latest updatedAt
     page.updatedAt = await WIKI.models.pages.query().findById(page.id).select('updatedAt').then(r => r.updatedAt)
+
+    // -> Re-render and synchronize pages whose Markdown links were rewritten
+    await WIKI.models.pages.syncHistoricalLinkRewrites(historicalLinkRewrites, {
+      skipStorage: opts.skipStorage
+    })
 
     return page
   }
@@ -496,6 +525,7 @@ module.exports = class Page extends Model {
           id: updatedPage.id,
           destinationLocale: opts.locale,
           destinationPath: opts.path,
+          reuseHistoricalPath: opts.reuseHistoricalPath,
           user: opts.user
         }, trx)
       } else {
@@ -722,6 +752,8 @@ module.exports = class Page extends Model {
   /**
    * Apply a page move using an existing transaction.
    *
+   * Reusing a historical destination requires explicit caller consent.
+   *
    * @param {Object} opts Page properties
    * @param {Object} trx Database transaction
    * @returns {Promise<Object>} Details needed for post-commit synchronization
@@ -793,12 +825,20 @@ module.exports = class Page extends Model {
       redirectQuery.forUpdate()
     }
     const destRedirect = await redirectQuery
+    const reuseHistoricalPath = opts.reuseHistoricalPath === true
     if (destPage) {
       throw new WIKI.Error.PagePathCollision()
     }
-    if (destRedirect) {
+    if (destRedirect && !reuseHistoricalPath) {
       throw new WIKI.Error.PageHistoricalPathCollision()
     }
+
+    let historicalLinkRewrites = (destRedirect && reuseHistoricalPath && destRedirect.pageId !== page.id) ?
+      await WIKI.models.pages.getHistoricalLinkRewrites({
+        sourcePath: destinationPath,
+        sourceLocale: opts.destinationLocale,
+        trx
+      }) : []
 
     // -> Create version snapshot
     await WIKI.models.pageHistory.addVersion({
@@ -811,6 +851,17 @@ module.exports = class Page extends Model {
 
     // -> Move page
     const destinationTitle = (page.title === _.last(page.path.split('/')) ? _.last(destinationPath.split('/')) : page.title)
+    historicalLinkRewrites = await WIKI.models.pages.applyHistoricalLinkRewrites(historicalLinkRewrites, {
+      authorId: opts.user.id,
+      user: opts.user,
+      trx
+    })
+    if (destRedirect && reuseHistoricalPath) {
+      const deletedRedirects = await WIKI.models.pageRedirects.query(trx).deleteById(destRedirect.id)
+      if (deletedRedirects !== 1) {
+        throw new WIKI.Error.PageHistoricalPathCollision()
+      }
+    }
     const updatedPages = await WIKI.models.pages.query(trx).patch({
       path: destinationPath,
       localeCode: opts.destinationLocale,
@@ -831,7 +882,8 @@ module.exports = class Page extends Model {
       destinationPath,
       destinationLocale: opts.destinationLocale,
       destinationTitle,
-      destinationHash
+      destinationHash,
+      historicalLinkRewrites
     }
   }
 
@@ -843,7 +895,7 @@ module.exports = class Page extends Model {
    * @returns {Promise} Promise with no value
    */
   static async syncPageMove (move, opts) {
-    const { page, destinationPath, destinationLocale, destinationTitle, destinationHash } = move
+    const { page, destinationPath, destinationLocale, destinationTitle, destinationHash, historicalLinkRewrites } = move
     await WIKI.models.pages.deletePageFromCache(page.hash)
     WIKI.events.outbound.emit('deletePageFromCache', page.hash)
 
@@ -891,6 +943,11 @@ module.exports = class Page extends Model {
       locale: destinationLocale,
       path: destinationPath,
       mode: 'create'
+    })
+
+    // -> Re-render and synchronize pages whose Markdown links were rewritten
+    await WIKI.models.pages.syncHistoricalLinkRewrites(historicalLinkRewrites, {
+      skipStorage: opts.skipStorage
     })
   }
 
@@ -1057,6 +1114,236 @@ module.exports = class Page extends Model {
     for (const hash of affectedHashes) {
       await WIKI.models.pages.deletePageFromCache(hash)
       WIKI.events.outbound.emit('deletePageFromCache', hash)
+    }
+  }
+
+  /**
+   * Find Markdown links that still use a historical path and rewrite them to
+   * the moved page's current path.
+   *
+   * @param {Object} opts Historical redirect properties
+   * @param {string} opts.sourcePath Historical page path
+   * @param {string} opts.sourceLocale Historical page locale code
+   * @param {Object} [opts.trx] Database transaction
+   * @returns {Promise<Array>} Pages and rewritten content
+   */
+  static async getHistoricalLinkRewrites (opts) {
+    const targetPage = await WIKI.models.pageRedirects.resolve({
+      path: opts.sourcePath,
+      locale: opts.sourceLocale,
+      trx: opts.trx
+    })
+    if (!targetPage) {
+      return []
+    }
+
+    const htmlCore = await WIKI.models.renderers.query(opts.trx).findById('htmlCore').select('config')
+    // pageLinks stores the resolved destination, so use the redirect target to
+    // narrow the source-level scan to pages that can contain the old URL.
+    const markdownPages = await WIKI.models.pages.query(opts.trx)
+      .where('contentType', 'markdown')
+      .whereIn('pages.id', function () {
+        this.select('pageLinks.pageId').from('pageLinks').where({
+          'pageLinks.path': targetPage.path,
+          'pageLinks.localeCode': targetPage.localeCode
+        })
+      })
+    const rewriteOptions = {
+      absoluteLinks: _.get(htmlCore, 'config.absoluteLinks', false),
+      sourceLocale: opts.sourceLocale,
+      sourcePath: opts.sourcePath,
+      targetLocale: targetPage.localeCode,
+      targetPath: targetPage.path
+    }
+
+    return markdownPages.reduce((rewrites, page) => {
+      const rewrite = WIKI.models.pages.calculateHistoricalLinkRewrite(page, rewriteOptions)
+      if (rewrite) {
+        rewrites.push(rewrite)
+      }
+      return rewrites
+    }, [])
+  }
+
+  /**
+   * Calculate historical link replacements for one Markdown page.
+   *
+   * @param {Object} page Page to rewrite
+   * @param {Object} opts Source and target link properties
+   * @returns {Object|null} Rewritten page details, or null if unchanged
+   */
+  static calculateHistoricalLinkRewrite (page, opts) {
+    const result = markdownHelper.rewriteLinkDestinations(page.content, destination => {
+      const isWrapped = destination.startsWith('<') && destination.endsWith('>')
+      let href = isWrapped ? destination.slice(1, -1) : destination
+      const isFullWikiUrl = WIKI.config.host.length > 7 && href.indexOf(`${WIKI.config.host}/`) === 0
+      if (isFullWikiUrl) {
+        href = href.replace(WIKI.config.host, '')
+      } else if (href.indexOf('://') >= 0 || href.startsWith('//')) {
+        return destination
+      }
+      const hrefPath = href.split(/[?#]/, 1)[0]
+      if (!href || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:') || hrefPath.indexOf('.') >= 0) {
+        return destination
+      }
+
+      let normalizedHref = href
+      if (WIKI.config.lang.namespacing) {
+        if (!normalizedHref.startsWith('/')) {
+          normalizedHref = opts.absoluteLinks ?
+            `/${page.localeCode}/${normalizedHref}` :
+            (page.path === 'home' ? `/${page.localeCode}/${normalizedHref}` : `/${page.localeCode}/${page.path}/${normalizedHref}`)
+        } else {
+          try {
+            const absoluteUrl = new URL(`http://x${normalizedHref}`)
+            if (!pageHelper.parsePath(absoluteUrl.pathname).explicitLocale) {
+              normalizedHref = `/${page.localeCode}${normalizedHref}`
+            }
+          } catch (err) {
+            return destination
+          }
+        }
+      } else if (!normalizedHref.startsWith('/')) {
+        normalizedHref = opts.absoluteLinks ?
+          `/${normalizedHref}` :
+          (page.path === 'home' ? `/${normalizedHref}` : `/${page.path}/${normalizedHref}`)
+      }
+
+      let parsedUrl
+      try {
+        parsedUrl = new URL(`http://x${normalizedHref}`)
+      } catch (err) {
+        return destination
+      }
+      const parsedPath = pageHelper.parsePath(parsedUrl.pathname)
+      if (parsedPath.path !== opts.sourcePath || parsedPath.locale !== opts.sourceLocale) {
+        return destination
+      }
+
+      const targetHref = WIKI.config.lang.namespacing ?
+        `/${opts.targetLocale}/${opts.targetPath}` :
+        `/${opts.targetPath}`
+      const rewrittenHref = `${isFullWikiUrl ? WIKI.config.host : ''}${targetHref}${parsedUrl.search}${parsedUrl.hash}`
+      return isWrapped ? `<${rewrittenHref}>` : rewrittenHref
+    })
+    return result.replacements > 0 ?
+      {
+        page,
+        content: result.content,
+        replacements: result.replacements,
+        rewriteOptions: opts
+      } :
+      null
+  }
+
+  /**
+   * Persist historical link rewrites as part of the operation that consumes
+   * their redirect.
+   *
+   * @param {Array} rewrites Pages and rewritten content
+   * @param {Object} opts Transaction and author properties
+   * @returns {Promise<Array>} Rewrites that were actually applied
+   */
+  static async applyHistoricalLinkRewrites (rewrites, opts) {
+    const appliedRewrites = []
+    for (const rewrite of _.sortBy(rewrites, 'page.id')) {
+      if (!WIKI.auth.checkAccess(opts.user, ['write:pages'], {
+        path: rewrite.page.path,
+        locale: rewrite.page.localeCode
+      })) {
+        throw new WIKI.Error.PageUpdateForbidden()
+      }
+      const updatedRows = await WIKI.models.pages.query()
+        .patch({
+          authorId: opts.authorId,
+          content: rewrite.content
+        })
+        .findById(rewrite.page.id)
+        .where('updatedAt', rewrite.page.updatedAt)
+        .where('content', rewrite.page.content)
+        .where('contentType', rewrite.page.contentType)
+        .where('localeCode', rewrite.page.localeCode)
+        .where('path', rewrite.page.path)
+        .transacting(opts.trx)
+
+      if (updatedRows > 0) {
+        await WIKI.models.pageHistory.addVersion({
+          ...rewrite.page,
+          action: 'updated',
+          versionDate: rewrite.page.updatedAt
+        }, opts.trx)
+        appliedRewrites.push(rewrite)
+        continue
+      }
+
+      // The page changed after it was initially read. Lock and rewrite the
+      // latest version so stale Markdown can never overwrite a user's edit.
+      const latestPageQuery = WIKI.models.pages.query()
+        .findById(rewrite.page.id)
+        .transacting(opts.trx)
+      const dbClient = String(_.get(WIKI, 'models.knex.client.config.client', ''))
+      if (!dbClient.includes('sqlite')) {
+        latestPageQuery.forUpdate()
+      }
+      const latestPage = await latestPageQuery
+      if (!latestPage || latestPage.contentType !== 'markdown') {
+        continue
+      }
+      if (!WIKI.auth.checkAccess(opts.user, ['write:pages'], {
+        path: latestPage.path,
+        locale: latestPage.localeCode
+      })) {
+        throw new WIKI.Error.PageUpdateForbidden()
+      }
+      const latestRewrite = WIKI.models.pages.calculateHistoricalLinkRewrite(latestPage, rewrite.rewriteOptions)
+      if (!latestRewrite) {
+        continue
+      }
+
+      await WIKI.models.pageHistory.addVersion({
+        ...latestPage,
+        action: 'updated',
+        versionDate: latestPage.updatedAt
+      }, opts.trx)
+      await WIKI.models.pages.query()
+        .patch({
+          authorId: opts.authorId,
+          content: latestRewrite.content
+        })
+        .findById(latestPage.id)
+        .transacting(opts.trx)
+      appliedRewrites.push(latestRewrite)
+    }
+    return appliedRewrites
+  }
+
+  /**
+   * Re-render and synchronize pages changed by a historical link rewrite.
+   *
+   * @param {Array} rewrites Rewritten pages
+   * @param {Object} opts Synchronization options
+   * @returns {Promise} Promise with no value
+   */
+  static async syncHistoricalLinkRewrites (rewrites, opts = {}) {
+    if (rewrites.length > 0) {
+      const replacementCount = _.sumBy(rewrites, 'replacements')
+      WIKI.logger.info(`Rewriting ${replacementCount} historical Markdown link(s) across ${rewrites.length} page(s)...`)
+    }
+    for (const rewrite of rewrites) {
+      const page = await WIKI.models.pages.getPageFromDb(rewrite.page.id)
+      await WIKI.models.pages.renderPage(page)
+      WIKI.events.outbound.emit('deletePageFromCache', page.hash)
+
+      const pageContents = await WIKI.models.pages.query().findById(page.id).select('render')
+      page.safeContent = WIKI.models.pages.cleanHTML(pageContents.render)
+      await WIKI.data.searchEngine.updated(page)
+
+      if (!opts.skipStorage) {
+        await WIKI.models.storage.pageEvent({
+          event: 'updated',
+          page
+        })
+      }
     }
   }
 

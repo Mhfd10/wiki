@@ -94,6 +94,11 @@ type PageMutation {
     path: String!
     publishEndDate: Date
     publishStartDate: Date
+    """
+    Explicitly allow this operation to take ownership of a path currently
+    reserved as a historical redirect.
+    """
+    reuseHistoricalPath: Boolean = false
     scriptCss: String
     scriptJs: String
     tags: [String]!
@@ -126,6 +131,11 @@ type PageMutation {
     id: Int!
     destinationPath: String!
     destinationLocale: String!
+    """
+    Explicitly allow this operation to take ownership of a path currently
+    reserved as a historical redirect.
+    """
+    reuseHistoricalPath: Boolean = false
   ): DefaultResponse @auth(requires: ["manage:pages", "manage:system"])
 
   delete(
